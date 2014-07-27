@@ -101,18 +101,20 @@ func (n *Notification) WriteTo(wr io.Writer) (int64, error) {
 }
 
 type APNSClient struct {
-  ctx       appengine.Context
-  pem       string
-  apnsAddr  string            // "gateway.sandbox.push.apple.com"
-  port      string            // "2195"
+  ctx         appengine.Context
+  pem         string
+  passphrase  string
+  apnsAddr    string            // "gateway.sandbox.push.apple.com"
+  port        string            // "2195"
 }
 
-func New(ctx appengine.Context, pem string, apnsAddr string, port string) *APNSClient {
+func New(ctx appengine.Context, pem string, passphrase, apnsAddr string, port string) *APNSClient {
   return &APNSClient{
-    ctx:      ctx,
-    pem:      pem,
-    apnsAddr: apnsAddr,
-    port:     port,
+    ctx:        ctx,
+    pem:        pem,
+    passphrase: passphrase,
+    apnsAddr:   apnsAddr,
+    port:       port,
   }
 }
 
@@ -138,7 +140,7 @@ func (a *APNSClient) dial() (*socket.Conn, net.Conn, error) {
   if err != nil {
     return nil, nil, err
   }
-  certificate, err := LoadPemFile(a.pem)
+  certificate, err := LoadPemFile(a.pem, a.passphrase)
   if err != nil {
     return nil, nil, err
   }
@@ -189,17 +191,17 @@ func (a *APNSClient) openConn() error {
 }
 
 // LoadPemFile reads a combined certificate+key pem file into memory.
-func LoadPemFile(pemFile string) (cert tls.Certificate, err error) {
+func LoadPemFile(pemFile string, passphrase string) (cert tls.Certificate, err error) {
   pemBlock, err := ioutil.ReadFile(pemFile)
   if err != nil {
     return
   }
-  return LoadPem(pemBlock)
+  return LoadPem(pemBlock, passphrase)
 }
 
 // LoadPem is similar to tls.X509KeyPair found in tls.go except that this
 // function reads all blocks from the same file.
-func LoadPem(pemBlock []byte) (cert tls.Certificate, err error) {
+func LoadPem(pemBlock []byte, passphrase string) (cert tls.Certificate, err error) {
   var block *pem.Block
   for {
     block, pemBlock = pem.Decode(pemBlock)
@@ -229,12 +231,18 @@ func LoadPem(pemBlock []byte) (cert tls.Certificate, err error) {
     return
   }
 
+  var decryptedBytes []byte
+  if decryptedBytes, err = x509.DecryptPEMBlock(block, []byte(passphrase)); err != nil {
+    err = errors.New("crypto/tls: passphrase: " + err.Error())
+    return
+  }
+
   // OpenSSL 0.9.8 generates PKCS#1 private keys by default, while
   // OpenSSL 1.0.0 generates PKCS#8 keys. We try both.
   var key *rsa.PrivateKey
-  if key, err = x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
+  if key, err = x509.ParsePKCS1PrivateKey(decryptedBytes); err != nil {
     var privKey interface{}
-    if privKey, err = x509.ParsePKCS8PrivateKey(block.Bytes); err != nil {
+    if privKey, err = x509.ParsePKCS8PrivateKey(decryptedBytes); err != nil {
       err = errors.New("crypto/tls: failed to parse key: " + err.Error())
       return
     }
