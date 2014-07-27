@@ -5,7 +5,7 @@ A simple library to send APNS on Google App Engine.
 ## Example
 
 ```go
-client := apns.New(c, "secret.pem", "gateway.sandbox.push.apple.com", "2195")
+client := apns.New(c, "secret.pem", "passphrase", "gateway.sandbox.push.apple.com", "2195")
 aps := apns.APS{
   Alert: "Hello world!",
 }
