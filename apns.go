@@ -1,17 +1,11 @@
 package apns
 
 import (
-  "bytes"
   "crypto/rsa"
   "crypto/tls"
   "crypto/x509"
-  "encoding/binary"
-  "encoding/hex"
-  "encoding/json"
   "encoding/pem"
   "errors"
-  "fmt"
-  "io"
   "io/ioutil"
   "log"
   "net"
@@ -24,81 +18,8 @@ import (
 
 var (
   apnsInitSync sync.Once
-  notifChannel chan Notification
+  notifChannel chan PushNotification
 )
-
-type APS struct {
-  Alert string `json:"alert,omitempty"`
-  Badge int    `json:"badge,omitempty"`
-  Sound string `json:"string,omitempty"`
-}
-
-type Payload struct {
-  APS APS `json:"aps"`
-}
-
-type Notification struct {
-  Device     string
-  Payload    Payload
-  Identifier int32
-  Expiration time.Time
-  Lazy       bool
-  ctx        appengine.Context
-  finished   chan error
-}
-
-// Implemented based on
-// https://developer.apple.com/library/ios/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/CommunicatingWIthAPS.html
-func (n *Notification) WriteTo(wr io.Writer) (int64, error) {
-  var buf = new(bytes.Buffer)
-  buf.WriteByte(2)
-
-  var frame = new(bytes.Buffer)
-
-  // Token
-  frame.WriteByte(1)
-  token, err := hex.DecodeString(n.Device)
-  if err != nil {
-    return 0, fmt.Errorf("invalid device token: %s", err.Error())
-  }
-  binary.Write(frame, binary.BigEndian, int16(len(token)))
-  frame.Write(token)
-
-  // Payload
-  frame.WriteByte(2)
-  payload, err := json.Marshal(n.Payload)
-  if err != nil {
-    return 0, fmt.Errorf("payload json error: %s", err.Error())
-  }
-  binary.Write(frame, binary.BigEndian, int16(len(payload)))
-  frame.Write(payload)
-
-  // Identifier (arbitrary)
-  frame.WriteByte(3)
-  binary.Write(frame, binary.BigEndian, int16(4))
-  binary.Write(frame, binary.BigEndian, n.Identifier) // 3 is arbitrary unique identifier
-
-  // Expiration
-  frame.WriteByte(4)
-  binary.Write(frame, binary.BigEndian, int16(4))
-  binary.Write(frame, binary.BigEndian, int32(n.Expiration.Unix())) // 0 means do not keep on apns
-
-  // Priority (10 for instant, 5 for lazy)
-  frame.WriteByte(5)
-  binary.Write(frame, binary.BigEndian, int16(1))
-  if n.Lazy {
-    binary.Write(frame, binary.BigEndian, byte(5)) // 5 means send later
-  } else {
-    binary.Write(frame, binary.BigEndian, byte(10)) // 10 means send now
-  }
-
-  // Write the frame
-  frameLen := frame.Len()
-  binary.Write(buf, binary.BigEndian, int32(frameLen))
-  frame.WriteTo(buf)
-
-  return buf.WriteTo(wr)
-}
 
 type APNSClient struct {
   ctx         appengine.Context
@@ -118,10 +39,10 @@ func New(ctx appengine.Context, pem string, passphrase, apnsAddr string, port st
   }
 }
 
-func (a *APNSClient) Send(n Notification) error {
+func (a *APNSClient) Send(n *PushNotification) error {
   var err error
   apnsInitSync.Do(func() {
-    notifChannel = make(chan Notification)
+    notifChannel = make(chan PushNotification)
     err = a.openConn()
   })
   if err != nil {
@@ -130,7 +51,7 @@ func (a *APNSClient) Send(n Notification) error {
 
   n.ctx = a.ctx
   n.finished = make(chan error)
-  notifChannel <- n
+  notifChannel <- *n
 
   return <-n.finished
 }
@@ -166,7 +87,13 @@ func (a *APNSClient) openConn() error {
       case n := <-notifChannel:
         a.ctx.Infof("Sending apns: %#v", n)
         gaeConn.SetContext(n.ctx)
-        _, err := n.WriteTo(apnsConn)
+        payload, err := n.ToBytes()
+        n.finished <- err
+	      if err != nil {
+          a.ctx.Infof("APNS error parsing payload %s", err.Error())
+          return
+        }
+        _, err = apnsConn.Write(payload)
         n.finished <- err
         if err != nil {
           a.ctx.Infof("APNS error encountered %s, reconnecting", err.Error())
@@ -270,3 +197,4 @@ func LoadPem(pemBlock []byte, passphrase string) (cert tls.Certificate, err erro
 
   return
 }
+
