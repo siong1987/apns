@@ -9,8 +9,6 @@ import (
   "math/rand"
   "strconv"
   "time"
-
-  "appengine"
 )
 
 // Push commands always start with command value 2.
@@ -75,20 +73,20 @@ type PushNotification struct {
   Identifier  int32
   Expiry      uint32
   DeviceToken string
-  payload     map[string]interface{}
+  Payload     map[string]interface{}
   Priority    uint8
-  ctx         appengine.Context
-  finished    chan error
+  RetryCount  int
+  Error       error
 }
 
 // NewPushNotification creates and returns a PushNotification structure.
 // It also initializes the pseudo-random identifier.
-func NewPushNotification(ctx appengine.Context) (pn *PushNotification) {
+func NewPushNotification() (pn *PushNotification) {
   pn = new(PushNotification)
-  pn.ctx = ctx
-  pn.payload = make(map[string]interface{})
+  pn.Payload = make(map[string]interface{})
   pn.Identifier = rand.New(rand.NewSource(time.Now().UnixNano())).Int31n(IdentifierUbound)
   pn.Priority = 10
+  pn.RetryCount = 3 // Retry at least 3 times before giving up
   return
 }
 
@@ -116,17 +114,17 @@ func (pn *PushNotification) AddPayload(p *Payload) {
 
 // Get returns the value of a payload key, if it exists.
 func (pn *PushNotification) Get(key string) interface{} {
-  return pn.payload[key]
+  return pn.Payload[key]
 }
 
 // Set defines the value of a payload key.
 func (pn *PushNotification) Set(key string, value interface{}) {
-  pn.payload[key] = value
+  pn.Payload[key] = value
 }
 
 // PayloadJSON returns the current payload in JSON format.
 func (pn *PushNotification) PayloadJSON() ([]byte, error) {
-  return json.Marshal(pn.payload)
+  return json.Marshal(pn.Payload)
 }
 
 // PayloadString returns the current payload in string format.

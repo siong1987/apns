@@ -23,3 +23,7 @@ notification := apns.Notification{
 
 client.Send(notification)
 ```
+
+## Thanks
+
+* (https://github.com/pkar/hermes)[https://github.com/pkar/hermes]

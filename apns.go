@@ -2,119 +2,141 @@ package apns
 
 import (
   "crypto/rsa"
-  "crypto/tls"
   "crypto/x509"
+  "crypto/tls"
   "encoding/pem"
-  "errors"
   "io/ioutil"
-  "log"
-  "net"
-  "sync"
   "time"
+  "log"
+  "errors"
 
   "appengine"
   "appengine/socket"
 )
 
-var (
-  apnsInitSync sync.Once
-  notifChannel chan PushNotification
+const (
+  // maxPoolSize is the number of sockets to open per app.
+  maxPoolSize = 5
 )
 
 type APNSClient struct {
-  ctx         appengine.Context
-  pem         string
-  passphrase  string
-  apnsAddr    string            // "gateway.sandbox.push.apple.com"
-  port        string            // "2195"
+  Ctx         appengine.Context
+  Pem         string
+  Passphrase  string
+  Gateway     string
 }
 
-func New(ctx appengine.Context, pem string, passphrase, apnsAddr string, port string) *APNSClient {
-  return &APNSClient{
-    ctx:        ctx,
-    pem:        pem,
-    passphrase: passphrase,
-    apnsAddr:   apnsAddr,
-    port:       port,
-  }
+// APNSPool ...
+type APNSPool struct {
+  Pool      chan *APNSConn
 }
 
-func (a *APNSClient) Send(n *PushNotification) error {
-  var err error
-  apnsInitSync.Do(func() {
-    notifChannel = make(chan PushNotification)
-    err = a.openConn()
-  })
-  if err != nil {
-    return err
-  }
-
-  n.ctx = a.ctx
-  n.finished = make(chan error)
-  notifChannel <- *n
-
-  return <-n.finished
+// APNSConn ...
+type APNSConn struct {
+  Gateway        string
+  ReadTimeout    time.Duration
+  TlsConn        *tls.Conn
+  TlsCfg         tls.Config
+  GaeConn        *socket.Conn
+  Connected      bool
 }
 
-func (a *APNSClient) dial() (*socket.Conn, net.Conn, error) {
-  gaeConn, err := socket.Dial(a.ctx, "tcp", a.apnsAddr+ ":" + a.port)
-  if err != nil {
-    return nil, nil, err
-  }
-  certificate, err := LoadPemFile(a.pem, a.passphrase)
-  if err != nil {
-    return nil, nil, err
-  }
+// NewAPNSClient ...
+func NewAPNSClient(ctx appengine.Context, pem string, passphrase, apnsAddr string, port string) *APNSClient {
+  gateway := apnsAddr + ":" + port
 
-  certs := []tls.Certificate{certificate}
-  conf := &tls.Config{
-    Certificates: certs,
+  client := &APNSClient{
+    Ctx:         ctx,
+    Pem:         pem,
+    Passphrase:  passphrase,
+    Gateway:     gateway,
   }
 
-  apnsConn := tls.Client(gaeConn, conf)
-
-  return gaeConn, apnsConn, nil
+  return client
 }
 
-func (a *APNSClient) openConn() error {
-  gaeConn, apnsConn, err := a.dial()
+// newAPNSConn is the actual connection to the remote server.
+func newAPNSConn(gateway, pem, passphrase string) (*APNSConn, error) {
+  conn := &APNSConn{}
+  crt, err := LoadPemFile(pem, passphrase)
   if err != nil {
-    return err
+    return nil, err
   }
-  go func() {
-    for {
-      select {
-      case n := <-notifChannel:
-        a.ctx.Infof("Sending apns: %#v", n)
-        gaeConn.SetContext(n.ctx)
-        payload, err := n.ToBytes()
-        n.finished <- err
-	      if err != nil {
-          a.ctx.Infof("APNS error parsing payload %s", err.Error())
-          return
-        }
-        _, err = apnsConn.Write(payload)
-        n.finished <- err
-        if err != nil {
-          a.ctx.Infof("APNS error encountered %s, reconnecting", err.Error())
-          apnsConn.Close()
-          gaeConn, apnsConn, err = a.dial()
-          if err != nil {
-            a.ctx.Infof("apns reconnect: %s", err.Error())
-            return
-          }
-        }
-        a.ctx.Infof("Finished sending apns")
-      case <-time.After(time.Minute):
-        log.Println("resetting apns daemon due to inactivity")
-        apnsConn.Close()
-        apnsInitSync = sync.Once{}
-        return
-      }
+  conn.Gateway = gateway
+  conn.TlsConn = nil
+  conn.TlsCfg = tls.Config{
+    Certificates: []tls.Certificate{crt},
+  }
+
+  conn.ReadTimeout = 150 * time.Millisecond
+  conn.Connected = false
+
+  return conn, nil
+}
+
+// newAPNSPool ...
+func newAPNSPool(gateway, pem, passphrase string) (*APNSPool, error) {
+  pool := make(chan *APNSConn, maxPoolSize)
+  n := 0
+  for x := 0; x < maxPoolSize; x++ {
+    c, err := newAPNSConn(gateway, pem, passphrase)
+    if err != nil {
+      // Possible errors are missing/invalid environment which would be caught earlier.
+      // Most likely invalid cert.
+      log.Println(err)
+      return nil, err
     }
-  }()
+    pool <- c
+    n++
+  }
+  return &APNSPool{pool}, nil
+}
 
-  return nil
+// Close ...
+func (c *APNSConn) Close() error {
+  var err error
+  if c.TlsConn != nil {
+    err = c.TlsConn.Close()
+    c.Connected = false
+  }
+  return err
+}
+
+// connect ...
+func (c *APNSConn) connect(ctx appengine.Context) (err error) {
+  if c.Connected {
+    c.GaeConn.SetContext(ctx)
+    return nil
+  }
+
+  if c.TlsConn != nil {
+    c.Close()
+  }
+
+  conn, err := socket.Dial(ctx, "tcp", c.Gateway)
+  if err != nil {
+    log.Println(err)
+    return err
+  }
+
+  c.TlsConn = tls.Client(conn, &c.TlsCfg)
+  c.GaeConn = conn
+  err = c.TlsConn.Handshake()
+  if err == nil {
+    c.Connected = true
+  }
+
+  return err
+}
+
+// Get ...
+func (p *APNSPool) Get() *APNSConn {
+  return <-p.Pool
+}
+
+// Release ...
+func (p *APNSPool) Release(conn *APNSConn) {
+  p.Pool <- conn
 }
 
 // LoadPemFile reads a combined certificate+key pem file into memory.
