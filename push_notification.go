@@ -77,6 +77,7 @@ type PushNotification struct {
   Priority    uint8
   RetryCount  int
   Error       error
+  Conn        *APNSConn
 }
 
 // NewPushNotification creates and returns a PushNotification structure.

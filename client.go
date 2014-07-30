@@ -43,8 +43,13 @@ func (a *APNSClient) Send(n *PushNotification) error {
     n.RetryCount--
   }
 
-  conn := pool.Get()
-  defer pool.Release(conn)
+  var conn *APNSConn
+  if n.Conn == nil {
+    conn = pool.Get()
+    defer pool.Release(conn)
+  } else {
+    conn = n.Conn
+  }
 
   err = conn.connect(a.Ctx)
   if err != nil {
@@ -60,7 +65,8 @@ func (a *APNSClient) Send(n *PushNotification) error {
   _, err = conn.TlsConn.Write(payload)
   if err != nil {
     conn.Connected = false
-    n.Error = errors.New("Connection closed")
+    n.Error = errors.New("Connection closed at write")
+    n.Conn = conn
     return a.Send(n)
   }
 
@@ -77,6 +83,7 @@ func (a *APNSClient) Send(n *PushNotification) error {
     if err == io.EOF {
       conn.Connected = false
       n.Error = errors.New("Connection closed")
+      n.Conn = conn
       return a.Send(n)
     }
 
@@ -99,10 +106,12 @@ func (a *APNSClient) Send(n *PushNotification) error {
       //8:   "Invalid Token",
       conn.Connected = false
       n.Error = errors.New(APNSStatusCodes[status])
+      n.Conn = conn
       err = a.Send(n)
     default:
       conn.Connected = false
       n.Error = errors.New("Unknown error")
+      n.Conn = conn
       err = a.Send(n)
     }
   }
