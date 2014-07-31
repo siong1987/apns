@@ -65,7 +65,7 @@ func (a *APNSClient) Send(n *PushNotification) error {
   _, err = conn.TlsConn.Write(payload)
   if err != nil {
     conn.Connected = false
-    n.Error = errors.New("Connection closed at write")
+    n.Error = err
     n.Conn = conn
     return a.Send(n)
   }
