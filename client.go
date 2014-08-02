@@ -5,7 +5,6 @@ import (
   "sync"
   "time"
   "io"
-  "net"
 )
 
 // APNSStatusCodes are codes to message from apns.
@@ -27,6 +26,12 @@ var (
   apnsInitSync  sync.Once
   pool          *APNSPool
 )
+
+type ReadConn struct {
+  r int
+  err error
+  read [6]byte
+}
 
 func (a *APNSClient) Send(n *PushNotification) error {
   var err error
@@ -70,52 +75,67 @@ func (a *APNSClient) Send(n *PushNotification) error {
     return a.Send(n)
   }
 
-  conn.TlsConn.SetReadDeadline(time.Now().Add(conn.ReadTimeout))
-  read := [6]byte{}
-  r, err := conn.TlsConn.Read(read[:])
-  if err != nil {
-    if err2, ok := err.(net.Error); ok && err2.Timeout() {
-      // Success, apns doesn't usually return a response if successful.
-      // Only issue is, is timeout length long enough (150ms) for err response.
-      return nil
+  timeoutChannel := make(chan bool, 1)
+	go func() {
+		time.Sleep(conn.ReadTimeout)
+		timeoutChannel <- true
+	}()
+
+  responseChannel := make(chan ReadConn, 1)
+	go func() {
+    read := [6]byte{}
+    r, err := conn.TlsConn.Read(read[:])
+    responseChannel <- ReadConn{
+      r: r,
+      err: err,
+      read: read,
+    }
+	}()
+
+  select {
+  case r := <-responseChannel:
+    if r.err != nil {
+      if r.err == io.EOF {
+        conn.Connected = false
+        n.Error = errors.New("Connection closed")
+        n.Conn = conn
+        return a.Send(n)
+      }
+
+      return r.err
     }
 
-    if err == io.EOF {
-      conn.Connected = false
-      n.Error = errors.New("Connection closed")
-      n.Conn = conn
-      return a.Send(n)
+    if r.r >= 0 {
+      status := uint8(r.read[1])
+      switch status {
+      case 0:
+        return nil
+      case 1, 2, 3, 4, 5, 6, 7, 8:
+        //1:   "Processing error"
+        //2:   "Missing Device Token",
+        //3:   "Missing Topic",
+        //4:   "Missing Payload",
+        //5:   "Invalid Token Size",
+        //6:   "Invalid Topic Size",
+        //7:   "Invalid Payload Size",
+        //8:   "Invalid Token",
+        conn.Connected = false
+        n.Error = errors.New(APNSStatusCodes[status])
+        n.Conn = conn
+        err = a.Send(n)
+      default:
+        conn.Connected = false
+        n.Error = errors.New("Unknown error")
+        n.Conn = conn
+        err = a.Send(n)
+      }
     }
 
     return err
+  case <-timeoutChannel:
+    return nil
   }
 
-  if r >= 0 {
-    status := uint8(read[1])
-    switch status {
-    case 0:
-      return nil
-    case 1, 2, 3, 4, 5, 6, 7, 8:
-      //1:   "Processing error"
-      //2:   "Missing Device Token",
-      //3:   "Missing Topic",
-      //4:   "Missing Payload",
-      //5:   "Invalid Token Size",
-      //6:   "Invalid Topic Size",
-      //7:   "Invalid Payload Size",
-      //8:   "Invalid Token",
-      conn.Connected = false
-      n.Error = errors.New(APNSStatusCodes[status])
-      n.Conn = conn
-      err = a.Send(n)
-    default:
-      conn.Connected = false
-      n.Error = errors.New("Unknown error")
-      n.Conn = conn
-      err = a.Send(n)
-    }
-  }
-
-  return err
+  return nil
 }
 
