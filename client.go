@@ -41,6 +41,9 @@ func (a *APNSClient) Send(n *PushNotification) error {
     return errors.New("Retried more than 3 times: " + n.Error.Error())
   } else {
     n.RetryCount--
+    if n.RetryCount < 2 {
+      a.Ctx.Infof("Retry count: %i", n.RetryCount)
+    }
   }
 
   var conn *APNSConn
@@ -77,6 +80,11 @@ func (a *APNSClient) Send(n *PushNotification) error {
     if err2, ok := err.(net.Error); ok && err2.Timeout() {
       // Success, apns doesn't usually return a response if successful.
       // Only issue is, is timeout length long enough (150ms) for err response.
+      return nil
+    }
+
+    if err.Error() == "API error 1 (remote_socket: SYSTEM_ERROR): system_error:35 error_detail:\"Resource temporarily unavailable\"" {
+      a.Ctx.Infof("Resource temporarily unavailable")
       return nil
     }
 
