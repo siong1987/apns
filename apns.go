@@ -16,7 +16,7 @@ import (
 
 const (
   // maxPoolSize is the number of sockets to open per app.
-  maxPoolSize = 5
+  maxPoolSize = 10
 )
 
 type APNSClient struct {
